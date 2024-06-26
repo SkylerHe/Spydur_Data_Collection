@@ -24,16 +24,13 @@ mynetid = getpass.getuser()
 ###
 import linuxutils
 from   urdecorators import trap
-from   dorunrun import *
 from   fileutils import *
-from   parsec4 import *
+from   sqlitedb import SQLiteDB
+from   dorunrun import dorunrun, ExitCode
 ###
 # imports and objects that are a part of this project
 ###
 import os
-import sqlite3
-import json
-import pandas as pd
 import argparse
 import random
 import time
@@ -87,7 +84,7 @@ def dither_time(t:int) -> int:
 
 
 @trap
-def collect_datum(cmd:str) -> dict
+def collect_datum(cmd:str) -> dict:
     """
     This function executes a Linux command through the dorunrun function and expects
     the output to be a nested dictionary from the standard output (stdout).
@@ -105,7 +102,7 @@ def collect_datum(cmd:str) -> dict
 
 
 @trap
-def filter_datum(data:dict, key:str = None) -> pd.Dataframe
+def filter_datum(data:dict, key:str = None) -> pd.Dataframe:
     """
     This function converts a dictionary to a pandas DataFrame.
     If a key is specified, it converts the dictionary at that key.
@@ -140,59 +137,7 @@ def merge_dfs(main_df: pd.DataFrame, *dfs: pd.DataFrame) -> pd.DataFrame:
         return main_df
     except Exception as e:
         return e
-@trap
-def build_datadict(df:pd.DataFrame, db:object):
-    """
-    This function builds data dictionary for cluster built by ACT company. 
-    The data dictionary includes cv_stats data.
-    The purpose is to write pandas DataFrame to SQLite3
-    :param df: the pandas DataFrame
-    :param db: the database connection
-    """
-    try:
-        
-        # Extract the 'title' from 'extras' column
-        df['title'] = df['extras'].apply(lambda x: x.get('title') if isinstance(x, dict) else None)
-                
-        # For TABLE data_dictionary 
-        sql_ddict = """INSERT INTO data_dictionary(titles, statstypes, names, types, methods, units, precision)
-               VALUES (?, ?, ?, ?, ?, ?, ?)"""
-        ddict_values = df[['title', 'stat_type', 'name', 'type', 'method', 'unit', 'precision']].values.tolist()
-        
-        # For TABLE devices
-        sql_devices = """INSERT INTO devices(titles, devices)
-                 VALUES (?, ?)"""
-        devices_values = df[['title', 'devices']].values.tolist()
-
-        cursor = db.cursor()  # Create a cursor object
-        
-        # Insert data into data_dictionary table
-        cursor.executemany(sql_ddict, data_dict_values)
-        
-        # Insert data into devices table
-        cursor.executemany(sql_devices, device_values)
-        
-        db.commit()  # Commit the transaction
-        
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        db.rollback()  # Rollback in case of an error 
      
-@trap
-def interesting_indexs(f:str) -> list:
-    """
-    Reads a text file, removes spaces and newline characters from each line, 
-    and returns the contents as a list.
-    
-    :param f: The path to the text file/file name.
-    :return: A list of strings with spaces and newline characters removed.
-    """
-    try:
-        with open(f, 'r') as ff:
-            thelist = [x.strip() for x in ff if x.strip()]
-        return thelist
-    except Exception as e:
-        print(e)
 @trap
 def datacollector_main(myargs:argparse.Namespace) -> int:
     global db_handle
@@ -206,16 +151,18 @@ def datacollector_main(myargs:argparse.Namespace) -> int:
     value = collect_data(value_cmd)
     df_value = filter_data(value)
     df_valdef = merge_dfs(df_value, df_def)    
-
-    db_handle = db = SQLiteDB(myargs.db)
-    # For TABLE FACTS
-    sql_facts = """INSERT INTO FACTS(t, indexs, devices, datum)
+    try:
+        db_handle = db = SQLiteDB(myargs.db)
+        # For TABLE FACTS
+        sql_facts = """INSERT INTO FACTS(t, indexs, devices, datum)
                    VALUES (?, ?, ?, ?)"""
-    facts_values= interesting_indexs(myargs.file)
-    cursor = db.cursor()  
-    cursor.executemany(sql_facts, facts_values)
-    db.commit() 
-    
+        facts_values= read_whitespace_file(myargs.file)
+        db.executemany(sql_facts, facts_values)
+    except Exception as e:
+        print(e)
+    finally:
+        db.commit() 
+    dither_iter = dither_time(myargs.freq_ 
     
     return os.EX_OK
 
@@ -237,8 +184,24 @@ if __name__ == '__main__':
         help="Name of database")
     parser.add_argument('--file', type=str, required=True,
         help="Name of the file to filter interested cv_stats data")
+    parser.add_argument('-f', '--freq', type=int, default=600,
+        help='number of seconds between polls (default:600)')
+    parser.add_argument('-n', type=int, default=sys.maxsize,
+        help="For debugging, limit number of readings (default:unlimited)")
     myargs = parser.parse_args()
     verbose = myargs.verbose
+    
+    for _ in caught_signals:
+         try:
+             signal.signal(_, handler)
+         except OSError as e:
+             myargs.verbose and sys.stderr.write(f"Cannot reassign signal {_}\n")
+         else:
+             myargs.verbose and sys.stderr.write(f"Signal {_} is being handled.\n")
+
+     exit_code = ExitCode(veryhungrycluster_main(myargs))
+     print(exit_code)
+     sys.exit(int(exit_code))
 
     try:
         outfile = sys.stdout if not myargs.output else open(myargs.output, 'w')
