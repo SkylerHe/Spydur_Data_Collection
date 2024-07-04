@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
+import typing
 from   typing import *
-
+min_py = (3, 8)
 
 ###
 # Standard imports, starting with os and sys
@@ -18,7 +19,7 @@ import argparse
 import contextlib
 import getpass
 mynetid = getpass.getuser()
-
+import logging
 ###
 # From hpclib
 ###
@@ -27,6 +28,7 @@ from   urdecorators import trap
 from   fileutils import *
 from   sqlitedb import SQLiteDB
 from   dorunrun import dorunrun, ExitCode
+from   urlogger import URLogger
 ###
 # imports and objects that are a part of this project
 ###
@@ -34,6 +36,10 @@ import os
 import argparse
 import random
 import time
+import signal
+import pandas as pd
+import json
+import io
 verbose = False
 
 ###
@@ -48,13 +54,20 @@ __email__ = 'skyler.he@richmond.edu', 'yingxinskyler.he@gmail.com'
 __status__ = 'in progress'
 __license__ = 'MIT'
 
+actions = {'freq':{'lower': 1,
+                   'upper': 1440,
+                   'e_msg': 'Frequency cannot be accepted'}}
+
+
+
+
 # For static data
 caught_signals = [  signal.SIGINT, signal.SIGQUIT,                     
                     signal.SIGUSR1, signal.SIGUSR2, signal.SIGTERM ]
-
+logger=URLogger(level=logging.DEBUG, logfile="collector.log")
 # For signal handler
 db_handle = None
-def handle(signum:int, stack:object=None) -> None:
+def handler(signum:int, stack:object=None) -> None:
     """
     Universal signal handler
     """
@@ -80,9 +93,20 @@ def dither_time(t:int) -> int:
     lower = int(t * 0.95)
     upper = int(t * 1.05)
     while True:
-        yield random.randiant(lower, upper)
+        yield random.randint(lower, upper)
 
+def legit_freq(value):
+    min_freq = 1  # 1 minute
+    max_freq = 1440  # 1 day
+    ivalue = int(value)
+    if ivalue < min_freq or ivalue > max_freq:
+        raise argparse.ArgumentTypeError(f"Frequency must be between {min_freq} and {max_freq} minutes.")
+    return ivalue
 
+def file_exists(value):
+    if not os.path.isfile(value):
+        raise argparse.ArgumentTypeError(f"File {value} does not exist.")
+    return value
 @trap
 def collect_datum(cmd:str) -> dict:
     """
@@ -102,7 +126,7 @@ def collect_datum(cmd:str) -> dict:
 
 
 @trap
-def filter_datum(data:dict, key:str = None) -> pd.Dataframe:
+def filter_datum(data:dict, key:str = None) -> pd.DataFrame:
     """
     This function converts a dictionary to a pandas DataFrame.
     If a key is specified, it converts the dictionary at that key.
@@ -116,81 +140,99 @@ def filter_datum(data:dict, key:str = None) -> pd.Dataframe:
         df = pd.DataFrame(data[key]).T
     except KeyError:
         df = pd.DataFrame(data).T
+        df.reset_index(inplace = True)
+        df.rename(columns={df.columns[0]: 'indexs'}, inplace=True)
     except Exception as e:
         return e
     
     return df
-
 @trap
-def merge_dfs(main_df: pd.DataFrame, *dfs: pd.DataFrame) -> pd.DataFrame:
+def build_facts(df:pd.DataFrame, db:object, ff:io.TextIOWrapper) -> None:
     """
-    This function merges multiple DataFrames into the main DataFrame using a left join on the index.
-
-    :param main_df: The main DataFrame.
-    :param dfs: Additional DataFrames to be merged.
-    :return: The merged DataFrame.
-    """
-    try:
-        for df in dfs:
-            df = df.set_index(main_df.index)
-            main_df = main_df.merge(df, left_index=True, right_index=True, how='left')
-        return main_df
-    except Exception as e:
-        return e
-     
-@trap
-def datacollector_main(myargs:argparse.Namespace) -> int:
-    global db_handle
-    # df_def     
-    def_cmd = "/usr/sbin/cv-cockpit-helper --stat-definition"
-    defs = collect_data(def_cmd)
-    df_def = filter_data(defs, myargs.key)
+    This function builds FACTS table for cluster built by ACT company
+    The FACTs table includes cv_stats datum
     
-    # df_value
-    value_cmd = "sudo cv-stats -a --format=json"
-    value = collect_data(value_cmd)
-    df_value = filter_data(value)
-    df_valdef = merge_dfs(df_value, df_def)    
+    The purpose is to write pandas DataFrame to SQLite3
+    :param df: the pandas DataFrame  
+    :param db: the database connection    
+    """
+
     try:
-        db_handle = db = SQLiteDB(myargs.db)
+        # Melt the DataFrame to long format
+        df = df.melt(id_vars=['indexs'], var_name='nodenames', value_name='datum')
+    
         # For TABLE FACTS
-        sql_facts = """INSERT INTO FACTS(t, indexs, devices, datum)
-                   VALUES (?, ?, ?, ?)"""
-        facts_values= read_whitespace_file(myargs.file)
-        db.executemany(sql_facts, facts_values)
+        sql_facts = """INSERT INTO FACTS(indexs, devices, datum)
+                   VALUES (?, ?, ?)"""
+        # Read the interested indexs from the file
+        interested_indexs= list(read_whitespace_file(ff))
+        df = df[df['indexs'].isin(interested_indexs)]
+        facts_values = df[['indexs','nodenames','datum']]
+        rows_affected_facts = db.executemany_SQL(sql_facts, facts_values)
+        logger.debug(f"Rows affected in facts table: {rows_affected_facts}")
+        
     except Exception as e:
         print(e)
     finally:
-        db.commit() 
-    dither_iter = dither_time(myargs.freq_ 
+        db.commit()
+
+@trap
+def collector_main(myargs:argparse.Namespace) -> int:
+    global db_handle
+    
+    db_handle = db = SQLiteDB(myargs.db)
+    myargs.verbose and print(f"Database {myargs.db} open")
+   
+    error = 0 
+    n=0
+    # Break time unit is minute
+    dither_iter = dither_time(myargs.freq * 60)
+    
+    while not error and n < myargs.n:
+        n += 1
+        # df_value
+        value_cmd = "sudo cv-stats -a --format=json"
+        value = collect_datum(value_cmd)
+        df_value = filter_datum(value)
+        
+        error = build_facts(df_value, db, myargs.file)
+        time.sleep(next(dither_iter))
     
     return os.EX_OK
 
 
 if __name__ == '__main__':
+    here       = os.getcwd()
+    progname   = os.path.basename(__file__)[:-3]
+    configfile = f"{here}/{progname}.toml"
+    lookupkey  = "lookup"
+    database   = "clusterdata.db"
+    logfile    = f"{here}/{progname}.log"
     
-    parser = argparse.ArgumentParser(prog="datacollector", 
-        description="What datacollector does, datacollector does best.")
+    parser = argparse.ArgumentParser(prog="collector", 
+        description="What collector does, collector does best.")
 
-    parser.add_argument('-i', '--input', type=str, default="",
-        help="Input file name.")
     parser.add_argument('-o', '--output', type=str, default="",
         help="Output file name")
-    parser.add_argument('-v', '--verbose', action='store_true',
-        help="Be chatty about what is taking place")
-    parser.add_argument('--key', type=str, default="", 
-        help="Key to filter the data dictionary")
-    parser.add_argument('--db', type=str, required=True, 
-        help="Name of database")
-    parser.add_argument('--file', type=str, required=True,
+    parser.add_argument('--key', type=str, default=lookupkey, 
+        help=f"Key to filter the data dictionary, defaults to {lookupkey}")
+    parser.add_argument('--db', type=file_exists, default=database, 
+        help=f"Name of database, defaults to {database}")
+    parser.add_argument('--file', type=file_exists, required=True,
         help="Name of the file to filter interested cv_stats data")
-    parser.add_argument('-f', '--freq', type=int, default=600,
-        help='number of seconds between polls (default:600)')
+    parser.add_argument('-f', '--freq', type=legit_freq, default=10,
+        help='number of minute between polls (default:60)')
     parser.add_argument('-n', type=int, default=sys.maxsize,
         help="For debugging, limit number of readings (default:unlimited)")
+    parser.add_argument('-z', '--zap', action='store_true', 
+        help=f"Remove {logfile} and create a new one.")
     myargs = parser.parse_args()
-    verbose = myargs.verbose
-    
+    if myargs.zap:
+        try:
+            os.unlink(logfile)
+        finally:
+            pass
+
     for _ in caught_signals:
          try:
              signal.signal(_, handler)
@@ -199,15 +241,13 @@ if __name__ == '__main__':
          else:
              myargs.verbose and sys.stderr.write(f"Signal {_} is being handled.\n")
 
-     exit_code = ExitCode(veryhungrycluster_main(myargs))
-     print(exit_code)
-     sys.exit(int(exit_code))
 
     try:
         outfile = sys.stdout if not myargs.output else open(myargs.output, 'w')
         with contextlib.redirect_stdout(outfile):
-            sys.exit(globals()[f"{os.path.basename(__file__)[:-3]}_main"](myargs))
-
+            exit_code = ExitCode(collector_main(myargs))
+            print(exit_code)
+            sys.exit(int(exit_code))
     except Exception as e:
         print(f"Escaped or re-raised exception: {e}")
 
