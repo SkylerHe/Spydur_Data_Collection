@@ -5,7 +5,7 @@ DROP TABLE IF EXISTS FACTS;
 
 -- Create the data_dictionary table
 CREATE TABLE data_dictionary(
-       indexs TEXT,
+       indices TEXT,
        statstypes TEXT,
        names TEXT,
        types TEXT,
@@ -17,7 +17,7 @@ CREATE TABLE data_dictionary(
 CREATE VIEW clusterdata AS
 SELECT
      DATETIME(t, 'localtime') AS time,
-     FACTS.indexs,
+     FACTS.indices,
      FACTS.devices,
      FACTS.datum,
      data_dictionary.types,
@@ -28,13 +28,13 @@ FROM
 LEFT JOIN
      data_dictionary
 ON
-     FACTS.indexs = data_dictionary.indexs
-/* clusterdata(time,indexs,devices,datum,types,methods,units) */;
+     FACTS.indices = data_dictionary.indices
+/* clusterdata(time,indices,devices,datum,types,methods,units) */;
 
 
 -- Create the FACTS table
 CREATE TABLE FACTS(
        t DATETIME DEFAULT CURRENT_TIMESTAMP,
-       indexs TEXT,
+       indices TEXT,
        devices TEXT,
        datum TEXT);
