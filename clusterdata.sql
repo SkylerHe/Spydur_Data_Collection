@@ -1,6 +1,7 @@
 -- Drop existing tables and views if they exist
 DROP TABLE IF EXISTS data_dictionary;
 DROP VIEW IF EXISTS clusterdata;
+DROP VIEW IF EXISTS latest_reading;
 DROP TABLE IF EXISTS FACTS;
 
 -- Create the data_dictionary table
@@ -29,12 +30,16 @@ LEFT JOIN
      data_dictionary
 ON
      FACTS.indices = data_dictionary.indices
-/* clusterdata(time,indices,devices,datum,types,methods,units) */;
+WHERE 
+     FACTS.datum IS NOT NULL;
+
+CREATE VIEW latest_reading AS
+SELECT * FROM clusterdata 
+    WHERE time = (SELECT max(time) FROM clusterdata);
 
 
--- Create the FACTS table
 CREATE TABLE FACTS(
        t DATETIME DEFAULT CURRENT_TIMESTAMP,
        indices TEXT,
        devices TEXT,
-       datum TEXT);
+       datum TEXT default NULL);
