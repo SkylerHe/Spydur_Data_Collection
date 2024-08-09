@@ -2,7 +2,7 @@
 
 ## Description
 
-This repository contains scripts and data files for collecting and analyzing cloud cluster usage across 32 devices.
+This repository contains Python scripts and database schemas for collecting and analyzing High Performance Computing Cluster(Spydur) usage across 32 devices.
 
 ### collector.py
 The `collector.py` script is responsible for gathering usage data from all 32 devices in the cloud cluster. It collects various metrics and logs them into a database for further analysis. This script can be customized with various optional arguments to specify the database, file filters, polling frequency, logging levels, and more.
